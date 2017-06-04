@@ -1,68 +1,42 @@
 package alogic
 
-import org.antlr.v4.runtime.{ ANTLRInputStream, CommonTokenStream }
+import org.antlr.v4.runtime.ANTLRInputStream
+import org.antlr.v4.runtime.CommonTokenStream
 
-// TODO figure out how to do preprocessor
-//   A) Put into VParser.g4
-//       Problem is that there are many places where a #if could appear, controlling ports/modules/statements and the grammar seems to explode
-//   B) Put into VLexer.g4 using actions
-//     This feels like the right place, but implementation is unclear.
-//       Problem is that it is not clear whether we can use the same trick of parsing header file once, and then reusing the defines
-//       Perhaps can make lexer once and give it more input?
-//       Perhaps can add method to adjust the defines dictionary?
+import scalax.file.Path
 
-import scala.io.Source
-import java.io.File
+object AParser {
 
-class AParser() {
+  def apply(path: Path, includeSearchPaths: List[Path] = Nil, initalDefines: Map[String, String] = Map()): Option[Program] = {
 
-  val builder = new AstBuilder()
-  val preproc = new Preproc()
-
-  def this(old: AParser) {
-    this()
-    builder.add(old.builder)
-    preproc.add(old.preproc)
-  }
-
-  def loadFile(filename: String): String = {
-    println(filename)
-    val bufferedSource = Source.fromFile(filename)
-    val code = bufferedSource.mkString
-    bufferedSource.close
-    code
-  }
-
-  def apply(path: String): Program = {
-
-    val pinputStream = new ANTLRInputStream(loadFile(path))
-    pinputStream.name = path + '\n' // TODO why have error messages stopped reporting the input stream?
+    Message.info(s"Parsing ${path.path}")
 
     // First preprocess input file to deal with #define s
-    val plexer = new antlr.VPreprocLexer(pinputStream)
-    val ptokenStream = new CommonTokenStream(plexer)
-    ptokenStream.fill()
+    val preprocessed = Preproc(path, includeSearchPaths, initalDefines)
 
-    val pparser = new antlr.VPreprocParser(ptokenStream)
-    val pparseTree = pparser.start()
-    val preprocessed: String = preproc(pparseTree)
+    // Now parse the file, return None if syntax error
+    val parseTree = {
+      val inputStream = new ANTLRInputStream(preprocessed)
+      inputStream.name = path.path
+      val lexer = new antlr.VLexer(inputStream)
+      val tokenStream = new CommonTokenStream(lexer)
+      tokenStream.fill()
 
-    // Now parse the file
-    val inputStream = new ANTLRInputStream(preprocessed)
-    val lexer = new antlr.VLexer(inputStream)
-    val tokenStream = new CommonTokenStream(lexer)
-    tokenStream.fill()
-
-    val parser = new antlr.VParser(tokenStream)
-    val parseTree = parser.start()
-    val ast = builder(parseTree)
-    //println(ast)
-    val errCount = parser.getNumberOfSyntaxErrors()
-    if (errCount > 0) {
-      println(s"Parsing error count is $errCount in $path")
+      val parser = new antlr.VParser(tokenStream)
+      parser.removeErrorListeners()
+      parser.addErrorListener(ParserErrorListener)
+      val paseTree = parser.start()
+      if (parser.getNumberOfSyntaxErrors == 0)
+        Some(paseTree)
+      else
+        None
     }
-    ast // TODO if have parsing errors should not continue compilation - return Option instead?
+
+    // If Some, build the AST
+    parseTree map {
+      val builder = new AstBuilder()
+      builder(_)
+    }
   }
 
 }
-

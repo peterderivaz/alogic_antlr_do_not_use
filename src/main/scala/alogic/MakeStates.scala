@@ -7,7 +7,7 @@
 //   ControlDo
 //   ControlIf
 //   ControlCaseStmt
-//   WhileLoop
+//   ControlWhile
 //   FunCall
 //   ControlBlock
 //   FenceStmt
@@ -59,14 +59,14 @@ final class MakeStates {
     // Add a declaration for the state variable
     if (fn2state contains "main") {
       val start = fn2state("main")
-      val sd = VarDeclaration(State(), DottedName("state" :: Nil), Some(makeNum(start)))
+      val sd = VarDeclaration(State, DottedName("state" :: Nil), Some(makeNum(start)))
       val prog2 = RewriteAST(prog) {
-        case Task(tasktype @ Fsm(), name, decls, fns) => Some(Task(tasktype, name, sd :: decls, fns))
-        case _                                        => None
+        case Task(Fsm, name, decls, fns) => Some(Task(Fsm, name, sd :: decls, fns))
+        case _                           => None
       }
       prog2.asInstanceOf[StateProgram]
     } else {
-      println(s"No function named main found")
+      Message.error(s"No function named 'main' found")
       prog
     }
   }
@@ -110,25 +110,25 @@ final class MakeStates {
   // If startState >= 0 it means the current list consists simply of StateStmt(startState)
   //    This can be useful to avoid emitting an empty state
   def makeStates(startState: Int, finalState: Int, tree: AlogicAST): List[AlogicAST] = tree match {
-    case FenceStmt() => List(GotoState(finalState))
-    case BreakStmt() => List(GotoState(breakTargets.head))
-    case ReturnStmt() => List(
+    case FenceStmt => List(GotoState(finalState))
+    case BreakStmt => List(GotoState(breakTargets.head))
+    case ReturnStmt => List(
       Minusminus(callDepth),
       GotoStmt("call_stack[call_depth_nxt]"))
     case GotoStmt(t) => List(GotoState(fn2state(t))) // TODO check targets exist in AstBuilder to avoid exception here
     case FunCall(name, args) => List( // require(args.length==0)  // TODO check in builder
       // Push return state
-      Assign(ArrayLookup(callStack, callDepth), "=", makeNum(finalState)),
+      Assign(ArrayLookup(callStack, callDepth), makeNum(finalState)),
       // increment depth
       Plusplus(callDepth),
       // branch to function
       GotoState(fn2state(ExtractName(name))) // TODO check target exists in builder
       )
     case ControlBlock(cmds) => makeBlockStmts(startState, finalState, cmds)
-    case WhileLoop(cond, body) => {
+    case ControlWhile(cond, body) => {
       val s = if (startState < 0) newState() else startState
       addTarget(finalState)
-      val follow = makeStates(s, finalState, body)
+      val follow = makeStates(s, finalState, ControlBlock(body))
       removeTarget()
       val loop = CombinatorialIf(cond, CombinatorialBlock(follow), Some(GotoState(finalState)))
       if (startState < 0) {
@@ -228,4 +228,3 @@ final class MakeStates {
   }
 
 }
-

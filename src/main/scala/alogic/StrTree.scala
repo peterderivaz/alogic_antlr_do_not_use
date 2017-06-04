@@ -3,16 +3,8 @@ package alogic
 // An efficient tree string builder (hopefully...)
 // The idea is that we construct an immutable tree representation of strings
 // With a fast toString function
-sealed trait StrTree
-case class Str(name: String) extends StrTree
-case class StrList(names: List[StrTree]) extends StrTree
-case class StrCommaList(names: List[StrTree]) extends StrTree
-case class StrProduct(names: List[StrTree]) extends StrTree
-case class StrSum(names: List[StrTree]) extends StrTree
-
-object MakeString {
-
-  def apply(tree: StrTree): String = {
+sealed trait StrTree {
+  override def toString: String = {
     val b = StringBuilder.newBuilder
 
     def reduce(names: List[StrTree], op: String, addBrackets: Boolean): Unit = {
@@ -33,14 +25,17 @@ object MakeString {
 
     def go(tree: StrTree): Unit = tree match {
       case Str(name)           => b.append(name)
-      case StrList(names)      => names foreach go
-      case StrCommaList(Nil)   => ()
-      case StrCommaList(names) => reduce(names, ",", false)
-      case StrProduct(names)   => reduce(names, "*", true)
-      case StrSum(names)       => reduce(names, "+", true)
+      case StrList(Nil, _)     => ()
+      case StrList(names, "")  => names foreach go
+      case StrList(names, "+") => reduce(names, "+", true)
+      case StrList(names, "*") => reduce(names, "*", true)
+      case StrList(names, op)  => reduce(names, op, false)
     }
 
-    go(tree)
+    go(this)
     b.toString
   }
 }
+
+case class Str(name: String) extends StrTree
+case class StrList(names: List[StrTree], sep: String = "") extends StrTree

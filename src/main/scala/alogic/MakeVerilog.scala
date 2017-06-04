@@ -28,11 +28,6 @@ final class MakeVerilog {
 
   var log2numstates = 0
 
-  def error(msg: String) {
-    println(msg)
-    System.exit(-1)
-  }
-
   // Name of signal used to check that a port contains valid data
   def valid(s: String): String =
     s + "_valid"
@@ -59,7 +54,7 @@ final class MakeVerilog {
     if (modMap contains n) {
       (f, modMap(n))
     } else {
-      error(s"Unknown module name $n")
+      Message.fatal(s"Unknown module name $n")
       (DottedName(Nil), new ModuleInstance("Unknown", "Unknown", Nil))
     }
   }
@@ -79,8 +74,8 @@ final class MakeVerilog {
       case Task(t, n, decls, _) => {
         modname = n
         outtype = t match {
-          case Fsm() | Pipeline()    => "reg "
-          case Network() | Verilog() => "wire "
+          case Fsm | Pipeline    => "reg "
+          case Network | Verilog => "wire "
         }
         decls foreach { x => id2decl(ExtractName(x)) = x }; true
       }
@@ -107,41 +102,41 @@ final class MakeVerilog {
     def writeSize(size: Int) = if (size > 1) s"[$size-1:0] " else ""
 
     def writeOut(typ: AlogicType, name: StrTree): Unit = typ match {
-      case IntType(b, size) => pw.println("  output " + outtype + writeSigned(b) + writeSize(size) + MakeString(name) + ";")
+      case IntType(b, size) => pw.println("  output " + outtype + writeSigned(b) + writeSize(size) + name + ";")
       case _                => // TODO support IntVType
     }
     def writeIn(typ: AlogicType, name: StrTree): Unit = typ match {
-      case IntType(b, size) => pw.println(s"  input wire ${writeSigned(b)}${writeSize(size)}" + MakeString(name) + ";")
+      case IntType(b, size) => pw.println(s"  input wire ${writeSigned(b)}${writeSize(size)}" + name + ";")
       case _                => // TODO support IntVType
     }
     def writeWire(typ: AlogicType, name: StrTree): Unit = typ match {
-      case IntType(b, size) => pw.println(s"  wire ${writeSigned(b)}${writeSize(size)}" + MakeString(name) + ";")
+      case IntType(b, size) => pw.println(s"  wire ${writeSigned(b)}${writeSize(size)}" + name + ";")
       case _                => // TODO support IntVType
     }
     def typeString(typ: AlogicType): String = {
       val typ2 = typ match {
-        case State() => IntType(false, log2numstates)
-        case x       => x
+        case State => IntType(false, log2numstates)
+        case x     => x
       }
       typ2 match {
         case IntType(b, size) => writeSigned(b) + writeSize(size)
         case IntVType(b, args) => {
-          val sz = MakeString(StrProduct(args.map(MakeExpr)))
+          val sz = StrList(args.map(MakeExpr), "*").toString
           writeSigned(b) + "[" + sz + "-1:0] "
         }
-        case _ => error("Cannot make type for $typ"); ""
+        case _ => Message.fatal(s"Cannot make type for $typ"); ""
       }
     }
     def writeVarInternal(typ: AlogicType, name: StrTree, resetToZero: Boolean): Unit = {
       // Convert state to uint type
       val typ2 = typ match {
-        case State() => IntType(false, log2numstates)
-        case x       => x
+        case State => IntType(false, log2numstates)
+        case x     => x
       }
-      val nm = MakeString(name)
+      val nm = name.toString
       typ2 match {
         case IntType(_, _) | IntVType(_, _) => {
-          pw.println(s"  reg " + typeString(typ2) + MakeString(nx(nm)) + ", " + MakeString(reg(nm)) + ";")
+          pw.println(s"  reg " + typeString(typ2) + nx(nm) + ", " + reg(nm) + ";")
           if (resetToZero)
             resets = StrList(Str("      ") :: Str(reg(name)) :: Str(s" <= 'b0;\n") :: Nil) :: resets
           clocks = StrList(Str("        ") :: Str(reg(name)) :: Str(" <= ") :: Str(nx(name)) :: Str(";\n") :: Nil) :: clocks
@@ -178,21 +173,37 @@ final class MakeVerilog {
 
     VisitAST(tree) {
       case Task(t, name, decls, fns) => {
-        pw.println(s"module $name (")
+        pw.print(s"module $name ")
+
+        val paramDecls = id2decl.values collect {
+          case x: ParamDeclaration => x
+        }
+
+        if (paramDecls.isEmpty) {
+          pw.println(s"(")
+        } else {
+          pw.println(s"#(")
+          // Emit parameter declarations
+          paramDecls foreach {
+            case ParamDeclaration(decltype, id, init) => {
+              SetNxType(nxMap, decltype, id, "")
+              SetNxType(regMap, decltype, id, "")
+              decltype match {
+                case IntType(b, size) => {
+                  pw.println(s"  parameter " + writeSigned(b) + writeSize(size) + id + "=" + MakeExpr(init) + ";")
+                }
+                case x => println(x) //() // TODO support IntVType
+              }
+            }
+          }
+          pw.println(s") (")
+        }
+
         pw.println("  input wire clk,")
         pw.println("  input wire rst_n,")
 
-        id2decl.values.foreach({
-          case ParamDeclaration(decltype, id, Some(init)) => {
-            SetNxType(nxMap, decltype, id, "")
-            SetNxType(regMap, decltype, id, "")
-            pw.println("param " + id + " = " + MakeString(MakeExpr(init)) + ";")
-          }
-          case ParamDeclaration(decltype, id, None) => {
-            SetNxType(nxMap, decltype, id, "")
-            SetNxType(regMap, decltype, id, "")
-            pw.println("param " + id + ";")
-          }
+        // Emit port declarations
+        id2decl.values foreach {
           case OutDeclaration(synctype, decltype, name) => {
             if (HasValid(synctype)) {
               pw.println("  output " + outtype + valid(name) + ";")
@@ -230,17 +241,19 @@ final class MakeVerilog {
             SetNxType(regMap, decltype, ExtractName(id), "")
           }
           case _ =>
-        })
-        pw.println(") begin")
-        // declare remaining variables
-        id2decl.values.foreach({
+        }
+
+        pw.println(")")
+
+        // Emit remaining variables
+        id2decl.values foreach {
           case VarDeclaration(decltype, ArrayLookup(DottedName(names), index), None) => {
             // Arrays only work with non-struct types
             // TODO maybe figure out the number of bits in the type and declare as this many?
             // TODO maybe detect more than one write to the same array in the same cycle?
             val n = names.mkString("_")
             Arrays.add(n)
-            val depth = MakeString(MakeExpr(index)).toInt // TODO detect if this fails and fail gracefully
+            val depth = MakeExpr(index).toString.toInt // TODO detect if this fails and fail gracefully
             val log2depth = ceillog2(depth)
             val t = typeString(decltype)
             pw.println(s"  reg ${n}_wr;")
@@ -272,10 +285,10 @@ final class MakeVerilog {
             resets = StrList(Str("      ") :: Str(reg(n)) :: Str(s" <= ") :: MakeExpr(init) :: Str(";\n") :: Nil) :: resets
           }
           case _ =>
-        })
+        }
         true
       }
-      case DeclarationStmt(VarDeclaration(decltype, name, init)) => { VisitType(decltype, ExtractName(name))(writeVarWithReset); false } // These resets are done when variable is declared in the code
+      case DeclarationStmt(VarDeclaration(decltype, name, init)) => false
       case Function(name, body) => {
         fns = CombStmt(6, body) :: fns
         if (generateAccept) {
@@ -312,7 +325,7 @@ final class MakeVerilog {
       case _ => true
     }
     if (verilogfns.length > 0) {
-      pw.write(MakeString(verilogfns))
+      pw.print(StrList(verilogfns))
     }
     if (fns.length > 0 || fencefns.length > 0) {
       // Start main combinatorial loop
@@ -321,17 +334,17 @@ final class MakeVerilog {
       pw.println("    go = 1'b1;")
       // Prepare defaults
       if (defaults.length > 0)
-        pw.println(MakeString(StrList(defaults)))
+        pw.println(StrList(defaults))
       if (fencefns.length > 0)
-        pw.println(MakeString(StrList(fencefns)))
+        pw.println(StrList(fencefns))
       pw.println("    case(state_q) begin")
       pw.println("      default: begin")
-      pw.println(MakeString(StrList(fns)))
+      pw.println(StrList(fns))
       pw.println("      end")
       pw.println("    end")
       if (clears.length > 0) {
         pw.println(s"    if (!$go) begin")
-        pw.write(MakeString(clears))
+        pw.print(StrList(clears))
         pw.println("    end")
       }
       pw.println("  end")
@@ -339,10 +352,10 @@ final class MakeVerilog {
       pw.println("")
       pw.println("  always @(posedge clk or negedge rst_n) begin")
       pw.println("    if (!rst_n) begin")
-      pw.print(MakeString(StrList(resets)))
+      pw.print(StrList(resets))
       pw.println("    end else begin")
       pw.println(s"      if ($go) begin")
-      pw.print(MakeString(StrList(clocks)))
+      pw.print(StrList(clocks))
       pw.println("      end")
       pw.println("    end")
       pw.println("  end")
@@ -379,21 +392,20 @@ final class MakeVerilog {
   } else nxMap(name)
 
   def nx(names: List[String]): String = nx(names.mkString("_"))
-  def nx(name: StrTree): String = nx(MakeString(name))
+  def nx(name: StrTree): String = nx(name.toString)
 
   // Construct the string to be used when this identifier is used on the LHS of an assignment
   def reg(names: List[String]): String = regMap(names.mkString("_"))
-  def reg(name: StrTree): String = regMap(MakeString(name))
+  def reg(name: StrTree): String = regMap(name.toString)
 
   implicit def string2StrTree(s: String): StrTree = Str(s)
-  implicit def stringList2StrTree(s: List[StrTree]): StrTree = StrList(s)
 
   // Compute an string tree for the number of bits in this type
   def MakeNumBits(typ: AlogicType): StrTree = typ match {
     case IntType(signed, size)  => Str(s"$size")
-    case IntVType(signed, args) => StrProduct(args.map(MakeExpr))
-    case State()                => Str(s"$log2numstates")
-    case Struct(fields)         => StrSum(fields.map(MakeNumBits))
+    case IntVType(signed, args) => StrList(args.map(MakeExpr), "*")
+    case State                  => Str(s"$log2numstates")
+    case Struct(fields)         => StrList(fields.map(MakeNumBits), "+")
   }
 
   def MakeNumBits(typ: FieldType): StrTree = typ match { case Field(typ2, name) => MakeNumBits(typ2) }
@@ -413,7 +425,7 @@ final class MakeVerilog {
       id2decl(n)
     }
     case ReadCall(name) => GetType(name)
-    case _              => { error(s"Cannot compute type for $tree"); State() }
+    case _              => { Message.fatal(s"Cannot compute type for $tree"); State }
   }
 
   // Construct a string for an expression
@@ -422,11 +434,11 @@ final class MakeVerilog {
       case ArrayLookup(name, index)              => StrList(List(MakeExpr(name), "[", MakeExpr(index), "]"))
       case BinaryArrayLookup(name, lhs, op, rhs) => StrList(List(MakeExpr(name), "[", MakeExpr(lhs), op, MakeExpr(rhs), "]"))
       case ValidCall(DottedName(names)) => id2decl(names.head) match {
-        case OutDeclaration(synctype, decl, n) => if (HasValid(synctype)) valid(n) else { error(s"Port $names does not use valid"); "" }
-        case InDeclaration(synctype, decl, n)  => if (HasValid(synctype)) valid(n) else { error(s"Port $names does not use valid"); "" }
-        case _                                 => error(s"Cannot access valid on $names"); ""
+        case OutDeclaration(synctype, decl, n) => if (HasValid(synctype)) valid(n) else { Message.fatal(s"Port $names does not use valid"); "" }
+        case InDeclaration(synctype, decl, n)  => if (HasValid(synctype)) valid(n) else { Message.fatal(s"Port $names does not use valid"); "" }
+        case _                                 => Message.fatal(s"Cannot access valid on $names"); ""
       }
-      case FunCall(name, args) => StrList(List(MakeExpr(name), "(", StrCommaList(args.map(MakeExpr)), ")"))
+      case FunCall(name, args) => StrList(List(MakeExpr(name), "(", StrList(args.map(MakeExpr), ","), ")"))
       case Zxt(numbits, expr) => {
         val totalSz = MakeExpr(numbits)
         val exprSz = MakeNumBits(GetType(expr))
@@ -438,18 +450,18 @@ final class MakeVerilog {
         val e = MakeExpr(expr)
         StrList(List("{{", totalSz, " - ", exprSz, "{", e, "[(", exprSz, ") - 1]}},", e, "}"))
       }
-      case DollarCall(name, args)    => StrList(List(name, "(", StrCommaList(args.map(MakeExpr)), ")"))
+      case DollarCall(name, args)    => StrList(List(name, "(", StrList(args.map(MakeExpr), ","), ")"))
       case ReadCall(name)            => MakeExpr(name)
       case BinaryOp(lhs, op, rhs)    => StrList(List(MakeExpr(lhs), Str(" "), op, Str(" "), MakeExpr(rhs)))
       case UnaryOp(op, lhs)          => StrList(List(op, MakeExpr(lhs)))
       case Bracket(content)          => StrList(List("(", MakeExpr(content), ")"))
       case TernaryOp(cond, lhs, rhs) => StrList(List(MakeExpr(cond), " ? ", MakeExpr(lhs), " : ", MakeExpr(rhs)))
       case BitRep(count, value)      => StrList(List("{", MakeExpr(count), "{", MakeExpr(value), "}}"))
-      case BitCat(parts)             => StrList(List("{", StrCommaList(parts.map(MakeExpr)), "}"))
+      case BitCat(parts)             => StrList(List("{", StrList(parts.map(MakeExpr), ","), "}"))
       case DottedName(names)         => nx(names)
       case Literal(s)                => StrList(List(""""""", s, """""""))
       case Num(n)                    => n
-      case e                         => error(s"Unexpected expression $e"); ""
+      case e                         => Message.fatal(s"Unexpected expression $e"); ""
     }
   }
 
@@ -473,7 +485,7 @@ final class MakeVerilog {
           if (!isLock && HasReady(synctype))
             add(ready(n) + " = 1'b1;\n")
         }
-        case _ => error(s"$name cannot be read"); false // TODO check this earlier?
+        case _ => Message.fatal(s"$name cannot be read"); false // TODO check this earlier?
       }
       false // No need to recurse
     }
@@ -493,16 +505,16 @@ final class MakeVerilog {
         d match {
           case OutDeclaration(synctype, _, _) => {
             synctype match {
-              case SyncReadyBubble() => add(s"$go = $go && !${valid(n)};\n")
-              case SyncReady()       => add(s"$go = $go && (!${valid(n)} || !${ready(n)});\n")
-              case SyncAccept()      => error("sync accept only supported as wire output type") // TODO check this earlier
-              case WireSyncAccept()  => add(s"$go = $go && ${accept(n)};\n")
-              case _                 =>
+              case SyncReadyBubble => add(s"$go = $go && !${valid(n)};\n")
+              case SyncReady       => add(s"$go = $go && (!${valid(n)} || !${ready(n)});\n")
+              case SyncAccept      => Message.fatal("sync accept only supported as wire output type") // TODO check this earlier
+              case WireSyncAccept  => add(s"$go = $go && ${accept(n)};\n")
+              case _               =>
             }
             if (HasValid(synctype))
               add(s"${valid(n)} = 1'b1;\n")
           }
-          case _ => error(s"$name cannot be written"); false // TODO check this earlier?
+          case _ => Message.fatal(s"$name cannot be written"); false // TODO check this earlier?
         }
         true // Recurse in case arguments use reads
       }
@@ -531,11 +543,11 @@ final class MakeVerilog {
   // Produce code to go into the case statements (we assume we have already had a "case(state) default: begin"
   // The top call should be with Function or VerilogFunction
   def CombStmt(indent: Int, tree: AlogicAST): StrTree = tree match {
-    case Assign(ArrayLookup(DottedName(names), index), "=", rhs) if (Arrays contains names.head) => {
+    case Assign(ArrayLookup(DottedName(names), index), rhs) if (Arrays contains names.head) => {
       val i = " " * indent
       val n = names.head
-      val r = MakeString(MakeExpr(rhs))
-      val d = MakeString(MakeExpr(index))
+      val r = MakeExpr(rhs).toString
+      val d = MakeExpr(index).toString
       val a = Str(s"""${i}begin
 $i  ${n}_wr = 1'b1;
 $i  ${n}_addr = $r;
@@ -544,7 +556,7 @@ ${i}end
 """)
       AddStall(indent, StallExpr(index) ::: StallExpr(rhs), a)
     }
-    case Assign(lhs, "=", rhs) => AddStall(indent, StallExpr(lhs) ::: StallExpr(rhs), StrList(List(Str(" " * indent), MakeExpr(lhs), " = ", MakeExpr(rhs), ";\n")))
+    case Assign(lhs, rhs) => AddStall(indent, StallExpr(lhs) ::: StallExpr(rhs), StrList(List(Str(" " * indent), MakeExpr(lhs), " = ", MakeExpr(rhs), ";\n")))
     case CombinatorialCaseStmt(value, cases) => AddStall(indent, StallExpr(value),
       StrList(Str(" " * indent + "case(") :: MakeExpr(value) :: Str(") begin\n") ::
         StrList(for (c <- cases) yield CombStmt(indent + 4, c)) ::
@@ -564,8 +576,8 @@ ${i}end
     case CombinatorialBlock(cmds) => StrList(Str(" " * indent) :: Str("begin\n") ::
       StrList(for { cmd <- cmds } yield CombStmt(indent + 4, cmd)) ::
       Str(" " * indent) :: Str("end\n") :: Nil)
-    case DeclarationStmt(VarDeclaration(decltype, id, Some(rhs))) => CombStmt(indent, Assign(id, "=", rhs))
-    case DeclarationStmt(VarDeclaration(decltype, id, None))      => CombStmt(indent, Assign(id, "=", Num("'b0")))
+    case DeclarationStmt(VarDeclaration(decltype, id, Some(rhs))) => CombStmt(indent, Assign(id, rhs))
+    case DeclarationStmt(VarDeclaration(decltype, id, None))      => CombStmt(indent, Assign(id, Num("'b0")))
     case AlogicComment(s)                                         => s"// $s\n"
     case StateBlock(state, cmds) => StrList(List(" " * (indent - 4), "end\n", " " * (indent - 4), MakeState(state), ": begin\n",
       StrList(for { cmd <- cmds } yield CombStmt(indent, cmd))))
@@ -578,10 +590,10 @@ ${i}end
         CombStmt(indent + 4, body) :: Nil)
     case CombinatorialCaseLabel(conds, body) => StrList(
       Str(" " * indent) ::
-        StrCommaList(conds.map(MakeExpr)) ::
+        StrList(conds.map(MakeExpr), ",") ::
         Str(":\n") :: CombStmt(indent + 4, body) :: Nil)
-    case DollarCall(name, args) => StrList(List(" " * indent, name, StrCommaList(args.map(MakeExpr))))
-    case x                      => error(s"Don't know how to emit code for $x"); Str("")
+    case DollarCall(name, args) => StrList(List(" " * indent, name, StrList(args.map(MakeExpr), ",")))
+    case x                      => Message.fatal(s"Don't know how to emit code for $x"); Str("")
   }
 
   // Note that valid can depend on accept
@@ -629,7 +641,7 @@ ${i}end
   }
 
   def AcceptStmt(indent: Int, tree: AlogicAST): Option[StrTree] = tree match {
-    case Assign(lhs, "=", rhs) => {
+    case Assign(lhs, rhs) => {
       IdsWritten.add(ExtractName(lhs))
       AddAccept(indent, AcceptExpr(lhs) ::: AcceptExpr(rhs), None)
     }
@@ -687,7 +699,7 @@ ${i}end
         Some(StrList(Str(" " * indent) :: Str("begin\n") :: StrList(s2) :: Str(" " * indent) :: Str("end\n") :: Nil))
     }
 
-    case DeclarationStmt(VarDeclaration(decltype, id, Some(rhs))) => AcceptStmt(indent, Assign(id, "=", rhs))
+    case DeclarationStmt(VarDeclaration(decltype, id, Some(rhs))) => AcceptStmt(indent, Assign(id, rhs))
     case StateBlock(state, cmds) => {
       // Clear sets used for tracking
       syncPortsFound = 0
@@ -698,10 +710,10 @@ ${i}end
       val s2 = s.flatten
       if (s2.length > 0) {
         // Check for error conditions
-        if (syncPortsFound > 1) error(s"Found multiple accept port reads in same cycle: $cmds")
-        if (usesPort.isDefined) error(s"Cannot access port $usesPort while generating accept: $cmds")
-        if (!IdsUsedToMakeAccept.intersect(IdsWritten).isEmpty) error("Cannot generate accept because an identifier is being written to: $cmds")
-        Some(StrList(List(" " * (indent - 4), MakeState(state), ": begin\n", s2, " " * (indent - 4), "end\n")))
+        if (syncPortsFound > 1) Message.fatal(s"Found multiple accept port reads in same cycle: $cmds")
+        if (usesPort.isDefined) Message.fatal(s"Cannot access port $usesPort while generating accept: $cmds")
+        if (!IdsUsedToMakeAccept.intersect(IdsWritten).isEmpty) Message.fatal(s"Cannot generate accept because an identifier is being written to: $cmds")
+        Some(StrList(List(" " * (indent - 4), MakeState(state), ": begin\n", StrList(s2), " " * (indent - 4), "end\n")))
       } else
         None
     }
@@ -718,7 +730,7 @@ ${i}end
         case None => None
         case Some(a) => Some(StrList(
           Str(" " * indent) ::
-            StrCommaList(conds.map(MakeExpr)) ::
+            StrList(conds.map(MakeExpr), ",") ::
             Str(":\n") :: a :: Nil))
       }
       val as = conds.map(AcceptExpr).flatten
@@ -747,7 +759,7 @@ ${i}end
             add(accept(n) + " = 1'b1;\n")
           }
           if (HasReady(synctype))
-            usesPort = Some(MakeString(MakeExpr(name)))
+            usesPort = Some(MakeExpr(name).toString)
         }
         case _ =>
       }
@@ -769,7 +781,7 @@ ${i}end
         d match {
           case OutDeclaration(synctype, _, _) => {
             if (HasValid(synctype))
-              usesPort = Some(MakeString(MakeExpr(name)))
+              usesPort = Some(MakeExpr(name).toString)
           }
           case _ => false
         }

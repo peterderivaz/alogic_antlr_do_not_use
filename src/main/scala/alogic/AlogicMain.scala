@@ -1,130 +1,141 @@
 
 package alogic
 
-import AstOps._
 import java.io.File
-import sys.process._
-
-import akka.actor.ActorSystem
-import com.beachape.filemanagement.MonitorActor
-import com.beachape.filemanagement.RegistryTypes._
-import com.beachape.filemanagement.Messages._
-
-import java.io.{ FileWriter, BufferedWriter }
-
 import java.nio.file.Paths
 import java.nio.file.StandardWatchEventKinds._
+
 import scala.collection.concurrent.TrieMap
+
+import com.beachape.filemanagement.Messages._
+import com.beachape.filemanagement.MonitorActor
+
+import AstOps._
+import akka.actor.ActorSystem
+import scalax.file.PathMatcher._
+import scalax.file.Path
+
+// TODO: handle this in a nicer way if possible
+object PortMap {
+  // This must be from a concurrent collection because it is populated from multiple threads
+  val portMap = new TrieMap[String, Task]()
+}
 
 object AlogicMain extends App {
 
-  val portMap = new TrieMap[String, Task]() // This must be from a concurrent collection because it is populated from multiple threads
+  //////////////////////////////////////////////////////////////////////////////
+  // Parse arguments
+  //////////////////////////////////////////////////////////////////////////////
 
-  val multiThreaded = false; // At the moment there does not seem to be much benefit from multithreading, so leave it off in order that error messages are in correct order
+  val conf = new CLIConf(args)
 
-  def getListOfFiles(dir: File): List[File] = {
-    dir.listFiles.filter(_.isFile).toList.filter { s => s.getName.endsWith("alogic") }
+  val listOfFiles: List[Path] = conf.path() match {
+    case IsFile(file)     => List(file)
+    case IsDirectory(dir) => dir.descendants("*.alogic", 1).toList
   }
 
-  val useMonitor = args.length > 1 && args(0) == "-m"
-  val args2 = if (useMonitor) args.tail else args
+  val odir = conf.odir()
+  if (!odir.exists) {
+    odir.createDirectory()
+  }
+
+  val multiThreaded = conf.parallel()
+
+  Message.verbose = conf.verbose()
+
+  val includeSearchPaths = conf.incdir()
+
+  val initalDefines = conf.defs.toMap
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Compile
+  //////////////////////////////////////////////////////////////////////////////
 
   ///println("""python test.py""".!)  Example of how to run python code
   // .!! gets output
   // Process("").lines runs in background and provides a Stream[String] of output
   // Throws exception if non-zero exit code
 
-  if (args2.length > 2 || args2.length < 1) {
-    println("Syntax: alogic [-m] [header file]* (source_file|source_dir)")
-    println("-m tells alogic to recompile whenever the source changes.")
-    System.exit(-1)
-  }
+  go
 
-  val outputdir = "generated"
-  val outdir = new File(outputdir)
-  if (!outdir.exists())
-    outdir.mkdir()
-  go
-  go
-  if (useMonitor) {
+  if (conf.time.isDefined) {
+    // Benchmark compilation time
+    val n = conf.time()
+    // run 'n' times an collect the runtimes
+    val dt = for (i <- 1 to n) yield {
+      Message.note(s"Benchmarking iteration $i")
+      val t0 = System.nanoTime()
+      go
+      (System.nanoTime() - t0) / 1e9
+    }
+    // Compute mean
+    val mean = dt.sum / n
+    // Compute 95% confidence interval using the normal distribution
+    // This really should be based on the t distribution, but we don't
+    // want a library depencency just for this ...
+    val sdev = dt.map(_ - mean).map(math.pow(_, 2)).sum / (n - 1)
+    val se = sdev / math.sqrt(n)
+    val me = 1.96 * se
+    Message.note("Compilation time: %.3fs +/- %.2f%% (%.3fs, %.3fs)" format (mean, me / mean * 100, mean - me, mean + me))
+  } else if (conf.monitor()) {
+    // Stay alive and wait for source chagnes
     implicit val system = ActorSystem("actorSystem")
     val fileMonitorActor = system.actorOf(MonitorActor(concurrency = 2))
-    println(s"Waiting for ${args(1)} to be modified (press return to quit)...")
+    Message.info(s"Waiting for ${conf.path().path} to be modified (press return to quit)...")
     fileMonitorActor ! RegisterCallback(
       event = ENTRY_MODIFY,
-      path = Paths get args(1),
+      path = Paths get conf.path().path,
       callback = { _ => go })
     io.StdIn.readLine()
-    println("Quitting")
+    Message.info("Quitting")
     system.terminate()
   }
 
+  sys exit (if (Message.fail) 1 else 0)
+
   def go() {
-    val t0 = System.nanoTime()
-    val codeFile = args.last
+    // Clear caches
+    Cache.clearAll()
 
-    portMap.clear()
+    PortMap.portMap.clear()
 
-    // Parse header files
-    val parser = new AParser()
-    for (f <- args2.init) parser(f)
+    // Construct potentially parallel file list
+    val filePaths = if (multiThreaded) listOfFiles.par else listOfFiles
 
-    // This method is called for each file that should be converted to Verilog
-    def compileFile(fname: String): (String, Program) = {
-      val parser2 = new AParser(parser) // Capture all structures from header files
+    // First pass - Build AST
+    val (asts, paths) = {
+      filePaths map (AParser(_, includeSearchPaths, initalDefines)) zip filePaths collect {
+        case (Some(ast), path) => (ast, path)
+      }
+    }.unzip
 
-      // Build AST
-      val ast = parser2(fname)
-
-      // Extract ports
-      VisitAST(ast) {
+    // Extract ports
+    asts foreach {
+      case (ast: Program) => VisitAST(ast) {
         case t @ Task(_, name, _, _) => {
-          if (portMap contains name)
-            println(s"WARNING: $name defined multiple times")
-          portMap(name) = t; false
+          if (PortMap.portMap contains name)
+            Message.warning(s"$name defined multiple times")
+          PortMap.portMap(name) = t; false
         }
         case _ => true // Recurse
       }
-      return (fname, ast)
     }
-
-    def buildFile(params: (String, Program)): Unit = {
-      val (fname, ast) = params
-      // Convert to state machine
-      val prog: StateProgram = new MakeStates()(ast)
-
-      // Remove complicated assignments and ++ and -- (MakeStates inserts some ++/--)
-      val prog2 = Desugar.RemoveAssigns(prog)
-
-      // Construct output filename
-      val f0 = new File(fname).getName
-      val f = new File(outdir, f0 + ".v").getPath()
-
-      // Write Verilog
-      new MakeVerilog()(prog2, f)
-    }
-
-    // Construct file list
-    val d = new File(codeFile)
-    val fileList = if (d.exists && d.isDirectory)
-      for (f <- getListOfFiles(d)) yield f.getPath
-    else
-      codeFile :: Nil
-
-    // First pass
-    val asts = if (multiThreaded)
-      fileList.par.map(compileFile).seq.toList
-    else
-      fileList.map(compileFile)
 
     // Second pass
-    if (multiThreaded)
-      asts.par.foreach(buildFile)
-    else
-      asts.foreach(buildFile)
+    asts zip paths foreach {
+      case (ast: Program, path: Path) =>
+        // Convert to state machine
+        val prog: StateProgram = new MakeStates()(ast)
 
-    val t1 = System.nanoTime()
-    println("Elapsed time: " + (t1 - t0) / 1000000000.0 + "s")
+        // Remove complicated assignments and ++ and -- (MakeStates inserts some ++/--)
+        val prog2 = Desugar.RemoveAssigns(prog)
+
+        // Construct output filename
+        val opath: Path = odir / (path.name + ".v")
+
+        // Write Verilog
+        new MakeVerilog()(prog2, opath.path)
+    }
 
   }
 }

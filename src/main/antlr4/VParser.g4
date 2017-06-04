@@ -6,162 +6,187 @@ options {
 
 start : (entities+=entity)* EOF ;
 
-entity : 
-   typedef
- | task
- | network
- ;
-  
-typedef : TYPEDEF known_type IDENTIFIER SEMICOLON;
-  
-tasktype : FSM #FsmType
-  | PIPELINE   #PipelineType
-  | VERILOG    #VerilogType
+entity
+  : typedef
+  | task
+  | network
   ;
 
-initializer : EQUALS expr;
+typedef : 'typedef' known_type IDENTIFIER ';' ;
 
-declaration : known_type primary_expr initializer?;
-
-sync_type : SYNC_READY_BUBBLE #SyncReadyBubbleType
-          | WIRE_SYNC_ACCEPT  #WireSyncAcceptType
-          | SYNC_READY #SyncReadyType
-          | WIRE_SYNC #WireSyncType
-          | SYNC_ACCEPT #SyncAcceptType
-          | SYNC #SyncType
-          | WIRE #WireType
-          ;
-
-task_declaration : 
-    OUT sync_type? known_type IDENTIFIER SEMICOLON     #OutDecl
-  | IN sync_type? known_type IDENTIFIER SEMICOLON      #InDecl
-  | PARAM sync_type? known_type IDENTIFIER initializer? SEMICOLON   #ParamDecl
-  | VERILOG known_type primary_expr SEMICOLON #VerilogDecl
-  | declaration SEMICOLON                              #Decl
+tasktype
+  : 'fsm'       #FsmType
+  | 'pipeline'  #PipelineType
+  | 'verilog'   #VerilogType
   ;
-    
-task : tasktype IDENTIFIER LEFTCURLY (decls+=task_declaration)* (contents+=task_content)* RIGHTCURLY;
 
-network : NETWORK IDENTIFIER LEFTCURLY (decls+=task_declaration)* (contents+=network_content)* RIGHTCURLY;
+decl_noinit
+  : known_type var_ref            #DeclNoInit
+  ;
 
-network_content : task | connect | instantiate;
+decl_init
+  : known_type var_ref '=' expr   #DeclInit
+  ;
 
-connect : dotted_name GOESTO comma_args SEMICOLON;
+declaration
+  : decl_noinit
+  | decl_init
+  ;
 
-instantiate : IDENTIFIER EQUALS IDENTIFIER LEFTBRACKET param_args RIGHTBRACKET SEMICOLON;
+sync_type
+  : SYNC_READY_BUBBLE #SyncReadyBubbleType
+  | WIRE_SYNC_ACCEPT  #WireSyncAcceptType
+  | SYNC_READY        #SyncReadyType
+  | WIRE_SYNC         #WireSyncType
+  | SYNC_ACCEPT       #SyncAcceptType
+  | SYNC              #SyncType
+  | WIRE              #WireType
+  ;
 
-known_type : 
-  BOOL                                            # BoolType
-  | INTTYPE                                       # IntType
-  | UINTTYPE                                      # UintType
-  | IDENTIFIER                                    # IdentifierType
-  | STRUCT LEFTCURLY (fields+=field)* RIGHTCURLY  # StructType
-  | INT LEFTBRACKET comma_args RIGHTBRACKET             # IntVType
-  | UINT LEFTBRACKET comma_args RIGHTBRACKET            # UintVType
+task_declaration
+  : 'out' sync_type? known_type IDENTIFIER ';'          #TaskDeclOut
+  | 'in' sync_type? known_type IDENTIFIER ';'           #TaskDeclIn
+  | PARAM sync_type? known_type IDENTIFIER '=' expr ';' #TaskDeclParam
+  | 'verilog' known_type var_ref ';'                    #TaskDeclVerilog
+  | declaration ';'                                     #TaskDecl
   ;
-    
-task_content :
-  VOID IDENTIFIER LEFTBRACKET RIGHTBRACKET statement  # Function
-  | VOID FENCE LEFTBRACKET RIGHTBRACKET statement     # FenceFunction
-  | VERILOGBODY verilogbody VRIGHTCURLY               # VerilogFunction
-  ;
-  
-verilogbody : (tks+=verilogtoken)*;
 
-verilogtoken :
-  VANY  # Vany
-  | VLEFTCURLY verilogbody VRIGHTCURLY # Vbody
-  ;
-  
-// TODO: Express expr as a single left-recursive structure
-//       Antlr will recognize this and treat with appropriate precedence
-  
-expr : binary_expr # NotTernaryExpr
-     | binary_expr QUESTIONMARK expr COLON expr # TernaryExpr
-     ; 
-      
-binary_op : BINARYOP | AND | OR | MINUS;
-   
-binary_expr : 
-  unary_expr binary_op expr # BinaryExpr
-  | unary_expr # NotBinaryExpr
-  ;
-    
-unary_op : NOT | TILDA | OR | MINUS | AND;
-        
-unary_expr : 
-  unary_op primary_expr # UnaryExpr
-  | primary_expr # NotUnaryExpr
-  ;
-    
-primary_expr : 
-  secondary_expr LEFTSQUARE expr RIGHTSQUARE  # ArrayAccessExpr
-  | secondary_expr LEFTSQUARE expr arrayop expr RIGHTSQUARE # ArrayAccess2Expr
-  | secondary_expr # SecondaryExpr
-  ;
-    
-arrayop : 
-  COLON
-  | MINUSCOLON
-  | PLUSCOLON
-  ;
-  
-comma_args : (es+=expr)? (COMMA es+=expr)*;
+task
+  : tasktype IDENTIFIER '{'
+      (decls+=task_declaration)*
+      (contents+=task_content)* 
+    '}';
 
-param_args : (es+=paramAssign)? (COMMA es+=paramAssign)*;
+network
+  : 'network' IDENTIFIER '{'
+      (decls+=task_declaration)*
+       (contents+=network_content)*
+    '}';
 
-paramAssign : expr EQUALS expr;
-    
-secondary_expr : 
-  TRUE # TrueExpr
-  | FALSE # FalseExpr
-  | LEFTBRACKET expr RIGHTBRACKET # BracketExpr
-  | TICKNUM # TicknumExpr
-  | CONSTANT TICKNUM # ConstantTickNumExpr
-  | IDENTIFIER TICKNUM # IdentifierTickNumExpr // Used to handle #define for the NUM'd0
-  | CONSTANT # ConstantExpr
-  | LITERAL # LiteralExpr
-  | LEFTCURLY expr LEFTCURLY expr RIGHTCURLY RIGHTCURLY # BitRepExpr
-  | LEFTCURLY comma_args RIGHTCURLY # BitCatExpr
-  | dotted_name LEFTBRACKET comma_args RIGHTBRACKET # FunCallExpr
-  | DOLLAR LEFTBRACKET comma_args RIGHTBRACKET # DollarExpr
-  | dotted_name # DottedNameExpr
+network_content
+  : task
+  | connect
+  | instantiate
   ;
-   
-dotted_name : (es+=IDENTIFIER) (DOT es+=IDENTIFIER)*;
+
+connect : dotted_name '->' comma_args ';' ;
+
+instantiate : IDENTIFIER '=' IDENTIFIER '(' param_args ')' ';' ;
+
+known_type
+  : 'bool'                    # BoolType
+  | INTTYPE                   # IntType
+  | UINTTYPE                  # UintType
+  | IDENTIFIER                # IdentifierType
+  | 'struct' '{'
+      (fields+=field)* 
+    '}'                       # StructType
+  | 'int'  '(' comma_args ')' # IntVType
+  | 'uint' '(' comma_args ')' # UintVType
+  ;
+
+task_content
+  : 'void' IDENTIFIER '(' ')' '{'
+      (stmts += statement)*
+    '}'                             # Function
+  | 'void' 'fence' '(' ')' '{'
+      (stmts += statement)*
+    '}'                             # FenceFunction
+  | VERILOGFUNC VERILOGBODY         # VerilogFunction
+  ;
+
+expr
+  : '(' expr ')'                              # ExprBracket
+  | op=('+' | '-' | '!' | '~' | '&' |
+        '~&' | '|' | '~|' | '^' | '~^') expr  # ExprUnary
+  | expr op='*' expr                          # ExprMulDiv  // TODO: '/' '%'
+  | expr op=('+' | '-') expr                  # ExprAddSub
+  | expr op=('<<' | '>>' | '>>>') expr        # ExprShift   // TODO: '<<<'
+  | expr op=('>' | '>=' | '<' | '<=') expr    # ExprCompare
+  | expr op=('==' | '!=') expr                # ExprEqual
+  | expr op='&' expr                          # ExprBAnd
+  | expr op=('^' | '~^') expr                 # ExprBXor
+  | expr op='|' expr                          # ExprBOr
+  | expr op='&&' expr                         # ExprAnd
+  | expr op='||' expr                         # ExprOr
+  | expr '?' expr ':' expr                    # ExprTernary
+  | '{' expr '{' expr '}' '}'                 # ExprRep
+  | '{' comma_args '}'                        # ExprCat
+  | dotted_name '(' comma_args ')'            # ExprCall
+  | var_ref                                   # ExprVarRef
+  | DOLLARID '(' comma_args ')'               # ExprDollar
+  | 'true'                                    # ExprTrue
+  | 'false'                                   # ExprFalse
+  | TICKNUM                                   # ExprTrickNum
+  | CONSTANT TICKNUM                          # ExprConstTickNum
+  | CONSTANT                                  # ExprConst
+  | LITERAL                                   # ExprLiteral
+  ;
+
+var_ref
+  : dotted_name '[' expr ']'                              # VarRefIndex
+  | dotted_name '[' expr op=(':' | '-:' | '+:') expr ']'  # VarRefSlice
+  | dotted_name                                           # VarRef
+  ;
+
+comma_args : (es+=expr)? (',' es+=expr)*;
+
+param_args : (es+=paramAssign)? (',' es+=paramAssign)*;
+
+paramAssign : expr '=' expr;
+
+dotted_name : (es+=IDENTIFIER) ('.' es+=IDENTIFIER)*;
 
 field : known_type IDENTIFIER SEMICOLON;
-       
-assign_op : EQUALS | ASSIGNOP;
-      
-case_stmt : 
-  DEFAULT COLON statement # DefaultCase
-  | comma_args COLON statement # NormalCase
-  ;
-    
-else_statement : ELSE statement;
 
-statement : 
-  LEFTCURLY (stmts+=statement)* RIGHTCURLY  # BlockStmt
-  | declaration SEMICOLON # DeclStmt
-  | WHILE LEFTBRACKET expr RIGHTBRACKET statement # WhileStmt
-  | IF LEFTBRACKET expr RIGHTBRACKET statement else_statement? # IfStmt
-  | CASE LEFTBRACKET expr RIGHTBRACKET LEFTCURLY (cases+=case_stmt)+ RIGHTCURLY # CaseStmt
-  | FOR LEFTBRACKET single_statement SEMICOLON expr SEMICOLON single_statement RIGHTBRACKET LEFTCURLY (stmts += statement)* RIGHTCURLY # ForStmt
-  | DO LEFTCURLY (stmts += statement)* RIGHTCURLY WHILE LEFTBRACKET expr RIGHTBRACKET SEMICOLON  # DoStmt
-  | single_statement SEMICOLON # SingleStmt
-  ;
-    
-single_statement : 
-  primary_expr PLUSPLUS   # PrimaryIncStmt
-  |primary_expr MINUSMINUS # PrimaryDecStmt
-  |primary_expr assign_op expr # AssignStmt
-  |primary_expr            # PrimaryStmt // Used when providing a function call by itself
-  |FENCE                   # FenceStmt
-  |BREAK                   # BreakStmt
-  |RETURN                  # ReturnStmt
-  |DOLLARCOMMENT LEFTBRACKET LITERAL RIGHTBRACKET # DollarCommentStmt
-  |GOTO IDENTIFIER         # GotoStmt
+case_stmt
+  : 'default'  ':' statement # DefaultCase
+  | comma_args ':' statement # NormalCase
   ;
 
+statement
+  : '{' (stmts+=statement)* '}'                 # BlockStmt
+  | declaration ';'                             # DeclStmt
+  | 'while' '(' expr ')' '{'
+      (stmts += statement)*
+    '}'                                         # WhileStmt
+  | 'if' '(' expr ')'
+      thenStmt=statement
+    ('else'
+      elseStmt=statement)?                      # IfStmt
+  | 'case' '(' expr ')' '{'
+      (cases+=case_stmt)+
+    '}'                                         # CaseStmt
+  | 'for' '(' init=for_init ';'
+              cond=expr ';'
+              step=assignment_statement ')' '{'
+      (stmts += statement)*
+    '}'                                         # ForStmt
+  | 'do' '{'
+      (stmts += statement)*
+    '}' 'while' '(' expr ')' ';'                # DoStmt
+  | 'fence' ';'                                 # FenceStmt
+  | 'break' ';'                                 # BreakStmt
+  | 'return' ';'                                # ReturnStmt
+  | '$' '(' LITERAL ')' ';'                     # DollarCommentStmt
+  | 'goto' IDENTIFIER ';'                       # GotoStmt
+  | assignment_statement ';'                    # AssignmentStmt
+  | expr ';'                                    # ExprStmt
+  ;
 
+for_init
+  : assignment_statement  #ForInitNoDecl
+  | decl_init             #ForInitDecl
+  ;
+
+lvalue
+  : var_ref                                   # LValue
+  | '{' refs+=lvalue (',' refs+=lvalue)+ '}'  # LValueCat
+  ;
+
+assignment_statement
+  : lvalue '++'           # AssignInc
+  | lvalue '--'           # AssignDec
+  | lvalue '=' expr       # Assign
+  | lvalue ASSIGNOP expr  # AssignUpdate
+  ;

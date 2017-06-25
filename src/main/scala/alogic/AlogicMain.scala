@@ -1,7 +1,6 @@
 
 package alogic
 
-import java.io.File
 import java.nio.file.Paths
 import java.nio.file.StandardWatchEventKinds._
 
@@ -10,16 +9,9 @@ import scala.collection.concurrent.TrieMap
 import com.beachape.filemanagement.Messages._
 import com.beachape.filemanagement.MonitorActor
 
-import AstOps._
 import akka.actor.ActorSystem
-import scalax.file.PathMatcher._
 import scalax.file.Path
-
-// TODO: handle this in a nicer way if possible
-object PortMap {
-  // This must be from a concurrent collection because it is populated from multiple threads
-  val portMap = new TrieMap[String, Task]()
-}
+import scalax.file.PathMatcher._
 
 object AlogicMain extends App {
 
@@ -97,45 +89,44 @@ object AlogicMain extends App {
     // Clear caches
     Cache.clearAll()
 
-    PortMap.portMap.clear()
-
     // Construct potentially parallel file list
     val filePaths = if (multiThreaded) listOfFiles.par else listOfFiles
 
-    // First pass - Build AST
-    val (asts, paths) = {
-      filePaths map (AParser(_, includeSearchPaths, initalDefines)) zip filePaths collect {
-        case (Some(ast), path) => (ast, path)
-      }
-    }.unzip
+    // Build AST
+    val asts = filePaths flatMap { AParser(_, includeSearchPaths, initalDefines) }
 
-    // Extract ports
-    asts foreach {
-      case (ast: Program) => VisitAST(ast) {
-        case t @ Task(_, name, _, _) => {
-          if (PortMap.portMap contains name)
-            Message.warning(s"$name defined multiple times")
-          PortMap.portMap(name) = t; false
-        }
-        case _ => true // Recurse
+    // Build catalogue of all modules
+    // TODO: check for multiple definitions of same module
+    val moduleCatalogue = {
+      asts.toList collect { case t @ ast.Task(name, _) => name -> t }
+    }.toMap
+
+    // Synthesise tasks
+    val tasks = {
+      val results = asts flatMap {
+        case task: ast.FsmTask => MakeStates(task)
+        case task              => Some(task)
+      }
+
+      // Flatten and apply desugaring
+      results map {
+        Desugar.RemoveAssigns(_)
       }
     }
 
-    // Second pass
-    asts zip paths foreach {
-      case (ast: Program, path: Path) =>
-        // Convert to state machine
-        val prog: StateProgram = new MakeStates()(ast)
-
-        // Remove complicated assignments and ++ and -- (MakeStates inserts some ++/--)
-        val prog2 = Desugar.RemoveAssigns(prog)
-
+    // Generate verilog
+    tasks foreach {
+      case task @ ast.Task(name, _) => {
         // Construct output filename
-        val opath: Path = odir / (path.name + ".v")
+        val opath: Path = odir / (name + ".v")
 
         // Write Verilog
-        new MakeVerilog()(prog2, opath.path)
+        try {
+          new MakeVerilog(moduleCatalogue)(task, opath.path)
+        } catch {
+          case _: java.util.NoSuchElementException => // Temporarily until it is handled more gracefully
+        }
+      }
     }
-
   }
 }

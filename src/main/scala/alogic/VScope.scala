@@ -18,7 +18,7 @@ import alogic.antlr.VParser._
 // Variable instances with a multiplicity greater than 1 are renamed as
 // <name> -> <name>_L<lineno> where <lineno> is the line number where the
 // variable is declared.
-class VScope(root: RuleNode) {
+class VScope(root: ParserRuleContext) {
 
   // A named pair of declared name and the location of the declaration
   private[this] case class Item(name: String, loc: Loc)
@@ -38,9 +38,12 @@ class VScope(root: RuleNode) {
 
   // Create new scope at node ctx
   private[this] def create(ctx: RuleContext) = {
-    if (ctx.parent == null) {
-      scopes(ctx) = mutable.Map[String, Option[Item]]().withDefaultValue(None)
-    } else {
+    if (ctx != root) {
+      if (scopes contains ctx) {
+        // If the mapping already exists, then it must be a transitive scope of
+        // the parent created by the getOrElseUpdate of the find method above
+        assert(scopes(ctx) == scopes(ctx.parent))
+      }
       scopes(ctx) = mutable.Map[String, Option[Item]]().withDefault(find(ctx.parent))
     }
   }
@@ -49,9 +52,17 @@ class VScope(root: RuleNode) {
   private[this] def insert(ctx: ParserRuleContext, name: String): Unit = {
     val scope = find(ctx)
     if (scope contains name) {
-      val Some(Item(_, line)) = scope(name)
-      Message.error(ctx, s"Multiple declarations of '$name' ...")
-      Message.error(ctx, s"... previous declaration at: ${line}")
+      val Some(Item(_, loc)) = scope(name)
+      Message.error(ctx, s"Multiple declarations of name '$name' ...")
+      Message.error(ctx, s"... previous declaration at: ${loc}")
+    } else {
+      scope(name) match {
+        case Some(Item(_, loc)) => {
+          Message.warning(ctx, s"Declaration of '$name' hides previous declaration of same name at ...")
+          Message.warning(ctx, s"... ${loc}")
+        }
+        case None => ()
+      }
     }
     scope(name) = Some(Item(name, ctx.loc))
     multiplicity(name) += 1
@@ -69,14 +80,14 @@ class VScope(root: RuleNode) {
   }
 
   // Walk the parse tree, extract declared names and build the variable scopes
-  private[this] object BuildScopes extends VBaseVisitor[Unit] {
+  private[this] object BuildScopes extends VScalarVisitor[Unit] {
     override def defaultResult = ()
 
     // Extract name from var_ref and insert into current scope
-    object InsertDeclVarRef extends VBaseVisitor[Unit] {
+    object InsertDeclVarRef extends VScalarVisitor[Unit] {
       override def defaultResult = ()
 
-      // TODO(geza): fail on declarations with ranges or other malformed var_refs
+      override def visitVarRefIndex(ctx: VarRefIndexContext) = visit(ctx.dotted_name)
 
       override def visitDotted_name(ctx: Dotted_nameContext) = {
         val name = ctx.es.toList.map(_.text) mkString "."
@@ -87,17 +98,6 @@ class VScope(root: RuleNode) {
           Message.error(ctx, s"Declaration of scoped name is invalid '$name'")
         }
       }
-    }
-
-    // Create root scope and add predefined identifiers
-    override def visitStart(ctx: StartContext) = {
-      create(ctx)
-
-      for (id <- List("zxt", "sxt", "go")) {
-        insert(ctx, id)
-      }
-
-      visitChildren(ctx)
     }
 
     // Create new scope for blocks
@@ -130,8 +130,14 @@ class VScope(root: RuleNode) {
       visitChildren(ctx)
     }
 
-    // Create new scope for task bodies
-    override def visitTask(ctx: TaskContext) = {
+    // Create new scope for fsm bodies
+    override def visitTaskFSM(ctx: TaskFSMContext) = {
+      create(ctx)
+      visitChildren(ctx)
+    }
+
+    // Create new scope for verilog bodies
+    override def visitTaskVerilog(ctx: TaskVerilogContext) = {
       create(ctx)
       visitChildren(ctx)
     }
@@ -145,6 +151,7 @@ class VScope(root: RuleNode) {
     // Insert special task declarations
     override def visitTaskDeclOut(ctx: TaskDeclOutContext) = insert(ctx, ctx.IDENTIFIER)
     override def visitTaskDeclIn(ctx: TaskDeclInContext) = insert(ctx, ctx.IDENTIFIER)
+    override def visitTaskDeclConst(ctx: TaskDeclConstContext) = insert(ctx, ctx.IDENTIFIER)
     override def visitTaskDeclParam(ctx: TaskDeclParamContext) = insert(ctx, ctx.IDENTIFIER)
     override def visitTaskDeclVerilog(ctx: TaskDeclVerilogContext) = InsertDeclVarRef(ctx.var_ref)
 
@@ -158,6 +165,14 @@ class VScope(root: RuleNode) {
       create(ctx)
       visitChildren(ctx)
     }
+  }
+
+  // Create root scope
+  scopes(root) = mutable.Map[String, Option[Item]]().withDefaultValue(None)
+
+  // Add all predefined names
+  for (id <- List("zxt", "sxt", "go")) {
+    insert(root, id)
   }
 
   // Built the scopes

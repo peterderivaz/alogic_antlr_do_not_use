@@ -4,20 +4,52 @@ options {
   tokenVocab = VLexer;
 }
 
-start : (entities+=entity)* EOF ;
+// TODO: syntax changes:
+//
+// AGREED: Add 'loop' '{'...'}' as the fundamental loop
+//
+// AGREED: Change
+//   'typedef' 'struct' '{'...'}' ID ';'
+// to:
+//   'struct' ID '{'...'}'
+//
+// PROPOSED: Change
+//   task ID '{' ports body '}'
+// to:
+//   task ID '('ports')' '{' body '}'
+//
+// PROPOSED: change
+//   'void' 'verilog' '(')' '{'...'}'
+// to:
+//   'verilog' {...}
+// or to something similar to:
+//   'verbatim' 'verilog' '{'...'}'
+//   (for when we would support multiple target languages???)
+
+start
+  : typedefinition*
+    entity
+    EOF
+  ;
+
+typedefinition
+  : typedef
+  | struct
+  ;
 
 entity
-  : typedef
-  | task
+  : task
   | network
   ;
 
-typedef : 'typedef' known_type IDENTIFIER ';' ;
+typedef
+  : 'typedef' known_type IDENTIFIER ';'
+  ;
 
-tasktype
-  : 'fsm'       #FsmType
-  | 'pipeline'  #PipelineType
-  | 'verilog'   #VerilogType
+struct
+  :  'typedef' 'struct' '{'
+      (fields+=field)*
+    '}' IDENTIFIER ';'
   ;
 
 decl_noinit
@@ -28,7 +60,7 @@ decl_init
   : known_type var_ref '=' expr   #DeclInit
   ;
 
-declaration
+decl
   : decl_noinit
   | decl_init
   ;
@@ -43,110 +75,130 @@ sync_type
   | WIRE              #WireType
   ;
 
-task_declaration
-  : 'out' sync_type? known_type IDENTIFIER ';'          #TaskDeclOut
-  | 'in' sync_type? known_type IDENTIFIER ';'           #TaskDeclIn
-  | PARAM sync_type? known_type IDENTIFIER '=' expr ';' #TaskDeclParam
-  | 'verilog' known_type var_ref ';'                    #TaskDeclVerilog
-  | declaration ';'                                     #TaskDecl
+network_decl
+  : 'out' sync_type? known_type IDENTIFIER ';'  #TaskDeclOut
+  | 'in' sync_type? known_type IDENTIFIER ';'   #TaskDeclIn
+  | 'param' known_type IDENTIFIER '=' expr ';'  #TaskDeclParam
+  | 'const' known_type IDENTIFIER '=' expr ';'  #TaskDeclConst
+  ;
+
+task_decl
+  : network_decl                        #DUMMYRULENAME
+  | 'verilog' known_type var_ref ';'    #TaskDeclVerilog
+  | decl ';'                            #TaskDecl
   ;
 
 task
-  : tasktype IDENTIFIER '{'
-      (decls+=task_declaration)*
-      (contents+=task_content)* 
-    '}';
+  : 'fsm' IDENTIFIER '{'
+      (decls+=task_decl)*
+      (contents+=task_content)*
+    '}'                                 #TaskFSM
+  | 'verilog' IDENTIFIER '{'
+      (decls+=task_decl)*
+      (contents+=verilog_function)*
+    '}'                                 #TaskVerilog
+  ;
 
 network
   : 'network' IDENTIFIER '{'
-      (decls+=task_declaration)*
-       (contents+=network_content)*
+      (decls+=network_decl)*
+      (contents+=network_content)*
     '}';
 
 network_content
   : task
   | connect
   | instantiate
+  | verilog_function
   ;
 
-connect : dotted_name '->' comma_args ';' ;
+connect : lhs=dotted_name '->' rhs+=dotted_name (',' rhs+=dotted_name)* ';' ;
 
-instantiate : IDENTIFIER '=' IDENTIFIER '(' param_args ')' ';' ;
+instantiate : IDENTIFIER '=' 'new' IDENTIFIER '(' param_args ')' ';' ;
 
 known_type
   : 'bool'                    # BoolType
   | INTTYPE                   # IntType
   | UINTTYPE                  # UintType
   | IDENTIFIER                # IdentifierType
-  | 'struct' '{'
-      (fields+=field)* 
-    '}'                       # StructType
-  | 'int'  '(' comma_args ')' # IntVType
-  | 'uint' '(' comma_args ')' # UintVType
+  | 'int'  '(' commaexpr ')'  # IntVType
+  | 'uint' '(' commaexpr ')'  # UintVType
+  ;
+
+function
+  : 'void' IDENTIFIER '(' ')' '{'
+      (stmts += statement)*
+    '}'
+  ;
+
+fence_function
+  : 'void' 'fence' '(' ')' '{'
+      (stmts += statement)*
+    '}'                             # FenceFunction
+  ;
+
+verilog_function
+  : VERILOGFUNC VERILOGBODY         # VerilogFunction
   ;
 
 task_content
-  : 'void' IDENTIFIER '(' ')' '{'
-      (stmts += statement)*
-    '}'                             # Function
-  | 'void' 'fence' '(' ')' '{'
-      (stmts += statement)*
-    '}'                             # FenceFunction
-  | VERILOGFUNC VERILOGBODY         # VerilogFunction
+  : function
+  | fence_function
+  | verilog_function 
   ;
 
 expr
-  : '(' expr ')'                              # ExprBracket
+  : '(' expr ')'                                      # ExprBracket
   | op=('+' | '-' | '!' | '~' | '&' |
-        '~&' | '|' | '~|' | '^' | '~^') expr  # ExprUnary
-  | expr op='*' expr                          # ExprMulDiv  // TODO: '/' '%'
-  | expr op=('+' | '-') expr                  # ExprAddSub
-  | expr op=('<<' | '>>' | '>>>') expr        # ExprShift   // TODO: '<<<'
-  | expr op=('>' | '>=' | '<' | '<=') expr    # ExprCompare
-  | expr op=('==' | '!=') expr                # ExprEqual
-  | expr op='&' expr                          # ExprBAnd
-  | expr op=('^' | '~^') expr                 # ExprBXor
-  | expr op='|' expr                          # ExprBOr
-  | expr op='&&' expr                         # ExprAnd
-  | expr op='||' expr                         # ExprOr
-  | expr '?' expr ':' expr                    # ExprTernary
-  | '{' expr '{' expr '}' '}'                 # ExprRep
-  | '{' comma_args '}'                        # ExprCat
-  | dotted_name '(' comma_args ')'            # ExprCall
-  | var_ref                                   # ExprVarRef
-  | DOLLARID '(' comma_args ')'               # ExprDollar
-  | 'true'                                    # ExprTrue
-  | 'false'                                   # ExprFalse
-  | TICKNUM                                   # ExprTrickNum
-  | CONSTANT TICKNUM                          # ExprConstTickNum
-  | CONSTANT                                  # ExprConst
-  | LITERAL                                   # ExprLiteral
+        '~&' | '|' | '~|' | '^' | '~^') expr          # ExprUnary
+  | expr op=('*' | '/' | '%') expr                    # ExprMulDiv
+  | expr op=('+' | '-') expr                          # ExprAddSub
+  | expr op=('<<' | '>>' | '>>>') expr                # ExprShift   // TODO: '<<<'
+  | expr op=('>' | '>=' | '<' | '<=') expr            # ExprCompare
+  | expr op=('==' | '!=') expr                        # ExprEqual
+  | expr op='&' expr                                  # ExprBAnd
+  | expr op=('^' | '~^') expr                         # ExprBXor
+  | expr op='|' expr                                  # ExprBOr
+  | expr op='&&' expr                                 # ExprAnd
+  | expr op='||' expr                                 # ExprOr
+  | expr '?' expr ':' expr                            # ExprTernary
+  | '{' expr '{' expr '}' '}'                         # ExprRep
+  | '{' commaexpr '}'                                 # ExprCat
+  | dotted_name '(' commaexpr ')'                     # ExprCall
+  | var_ref                                           # ExprVarRef
+  | var_ref '[' expr op=(':' | '-:' | '+:') expr ']'  # ExprSlice
+  | DOLLARID '(' commaexpr ')'                        # ExprDollar
+  | 'true'                                            # ExprTrue
+  | 'false'                                           # ExprFalse
+  | TICKNUM                                           # ExprTrickNum
+  | CONSTANT TICKNUM                                  # ExprConstTickNum
+  | CONSTANT                                          # ExprConst
+  | LITERAL                                           # ExprLiteral
   ;
 
 var_ref
-  : dotted_name '[' expr ']'                              # VarRefIndex
-  | dotted_name '[' expr op=(':' | '-:' | '+:') expr ']'  # VarRefSlice
-  | dotted_name                                           # VarRef
+  : dotted_name ('[' es+=expr ']')+   # VarRefIndex
+  | dotted_name                       # VarRef
   ;
 
-comma_args : (es+=expr)? (',' es+=expr)*;
+commaexpr : (expr)? (',' expr)* ;
 
-param_args : (es+=paramAssign)? (',' es+=paramAssign)*;
+param_args : (param_assign (',' param_assign)*)? ;
 
-paramAssign : expr '=' expr;
+param_assign : IDENTIFIER '=' expr ;
 
 dotted_name : (es+=IDENTIFIER) ('.' es+=IDENTIFIER)*;
 
 field : known_type IDENTIFIER SEMICOLON;
 
 case_stmt
-  : 'default'  ':' statement # DefaultCase
-  | comma_args ':' statement # NormalCase
+  : 'default' ':' statement # DefaultCase
+  | commaexpr ':' statement # NormalCase
   ;
 
 statement
   : '{' (stmts+=statement)* '}'                 # BlockStmt
-  | declaration ';'                             # DeclStmt
+  | decl ';'                                    # DeclStmt
   | 'while' '(' expr ')' '{'
       (stmts += statement)*
     '}'                                         # WhileStmt
@@ -180,8 +232,9 @@ for_init
   ;
 
 lvalue
-  : var_ref                                   # LValue
-  | '{' refs+=lvalue (',' refs+=lvalue)+ '}'  # LValueCat
+  : var_ref                                             # LValue
+  | var_ref '[' expr op=(':' | '-:' | '+:') expr ']'    # LValueSlice
+  | '{' refs+=lvalue (',' refs+=lvalue)+ '}'            # LValueCat
   ;
 
 assignment_statement

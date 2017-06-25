@@ -4,10 +4,11 @@ import org.antlr.v4.runtime.ANTLRInputStream
 import org.antlr.v4.runtime.CommonTokenStream
 
 import scalax.file.Path
+import alogic.ast.AstBuilder
 
 object AParser {
 
-  def apply(path: Path, includeSearchPaths: List[Path] = Nil, initalDefines: Map[String, String] = Map()): Option[Program] = {
+  def apply(path: Path, includeSearchPaths: List[Path] = Nil, initalDefines: Map[String, String] = Map()): Option[ast.Task] = {
 
     Message.info(s"Parsing ${path.path}")
 
@@ -33,10 +34,7 @@ object AParser {
     }
 
     // If Some, build the AST
-    parseTree map {
-      val builder = new AstBuilder()
-      builder(_)
-    }
+    parseTree map { AstBuilder(_) }
   }
 
 }

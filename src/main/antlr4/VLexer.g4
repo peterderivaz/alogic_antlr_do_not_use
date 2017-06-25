@@ -9,7 +9,7 @@ UINTTYPE: 'u' [0-9]+;
 
 INTTYPE: 'i' [0-9]+;
 
-TICKNUM: '\'' 's'? [bdhx] [0-9a-fA-F_]+ ;
+TICKNUM: '\'' 's'? [bdhx] [0-9a-fA-F_]+ ; // TODO remove 'x' ?
 
 DOLLARID: '$' SIMPLEID;
 
@@ -19,6 +19,8 @@ GOESTO: '->';
 
 
 MUL:        '*'   ;
+DIV:        '/'   ;
+MOD:        '%'   ;
 
 PLUS:       '+'   ;
 MINUS:      '-'   ;
@@ -88,7 +90,8 @@ TYPEDEF : 'typedef';
 STRUCT  : 'struct';
 IN      : 'in';
 OUT     : 'out';
-PARAM   : 'const' | 'param';  // TODO move 'const' option and use it instead of #defines
+CONST   : 'const' ;
+PARAM   : 'param' ;
 FENCE   : 'fence' ;
 TRUE    : 'true' ;
 FALSE   : 'false' ;
@@ -107,6 +110,7 @@ RETURN  : 'return' ;
 CASE    : 'case' ;
 DEFAULT : 'default' ;
 VERILOG : 'verilog' ;
+NEW     : 'new' ;
 
 SYNC_READY_BUBBLE:  'sync' WS 'ready' WS 'bubble';
 WIRE_SYNC_ACCEPT:  'wire' WS 'sync' WS 'accept';

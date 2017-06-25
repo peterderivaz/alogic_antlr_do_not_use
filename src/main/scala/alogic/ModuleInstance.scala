@@ -1,49 +1,62 @@
 package alogic
 
+import scala.collection._
+
+import alogic.ast._
+import scala.collection.mutable.Stack
+
 // This class keeps track of the connections of a particular module instance
 
-import scala.collection._
-import java.io._
+class ModuleInstance(val name: String, val task: Task, val paramAssigns: Map[String, Expr]) {
 
-class ModuleInstance(val uname: String, val module: String, val args: List[AlogicAST]) {
+  // TODO check in parser that no port name repeats
 
-  // Gather the ports from the AST
-  val task: Task = PortMap.portMap(module) // TODO check before phase 2 that this module exists
+  // Map from portname to Port with internal name
+  val iports: Map[String, Port] = {
+    task.decls collect {
+      case InDeclaration(SyncReadyBubble, kind, name) => name -> PortReady(name, kind)
+      case InDeclaration(SyncReady, kind, name)       => name -> PortReady(name, kind)
+      case InDeclaration(SyncAccept, kind, name)      => name -> PortAccept(name, kind)
+      case InDeclaration(WireSyncAccept, kind, name)  => name -> PortAccept(name, kind)
+      case InDeclaration(Sync, kind, name)            => name -> PortValid(name, kind)
+      case InDeclaration(WireSync, kind, name)        => name -> PortValid(name, kind)
+      case InDeclaration(Wire, kind, name)            => name -> PortNone(name, kind)
+    }
+  }.toMap
+  val oports: Map[String, Port] = {
+    task.decls collect {
+      case OutDeclaration(SyncReadyBubble, kind, name) => name -> PortReady(name, kind)
+      case OutDeclaration(SyncReady, kind, name)       => name -> PortReady(name, kind)
+      case OutDeclaration(SyncAccept, kind, name)      => name -> PortAccept(name, kind)
+      case OutDeclaration(WireSyncAccept, kind, name)  => name -> PortAccept(name, kind)
+      case OutDeclaration(Sync, kind, name)            => name -> PortValid(name, kind)
+      case OutDeclaration(WireSync, kind, name)        => name -> PortValid(name, kind)
+      case OutDeclaration(Wire, kind, name)            => name -> PortNone(name, kind)
+    }
+  }.toMap
 
-  val outs = mutable.Map[String, OutDeclaration]() // Map from portname to declaration
-  val outwires = mutable.Map[String, String]() // From portname to wire to be used
-  val ins = mutable.Map[String, InDeclaration]()
-  val inwires = mutable.Map[String, String]()
+  val ports = iports.values.toList ::: oports.values.toList
 
-  for (d <- task.decls) d match {
-    case d @ OutDeclaration(_, _, name) => outs(name) = d // TODO check in parser that no port name repeats
-    case d @ InDeclaration(_, _, name)  => ins(name) = d
-    case _                              =>
-  }
+  private[this] val prefix = if (name == "this") "" else name + "__"
 
-  def connect(port: DottedName, to: List[(DottedName, ModuleInstance)]): Unit = {
-    // TODO check in parser that ports have appropriate lengths
+  // Map from portname to Port with external wire names
+  val iwires: Map[String, Port] = {
+    iports map {
+      case (key, PortNone(name, kind))   => key -> PortNone(prefix + name, kind)
+      case (key, PortValid(name, kind))  => key -> PortValid(prefix + name, kind)
+      case (key, PortReady(name, kind))  => key -> PortReady(prefix + name, kind)
+      case (key, PortAccept(name, kind)) => key -> PortAccept(prefix + name, kind)
+    }
+  }.toMap
 
-    // Name the wires after the name of the module _ name of port
-    // For the toplevel connections we will use assigns to connect the pure names to our local names
-    // We could try and reduce the number of signals in certain cases at the cost of making this part a bit less regular.
+  val owires: Map[String, Port] = {
+    oports map {
+      case (key, PortNone(name, kind))   => key -> PortNone(prefix + name, kind)
+      case (key, PortValid(name, kind))  => key -> PortValid(prefix + name, kind)
+      case (key, PortReady(name, kind))  => key -> PortReady(prefix + name, kind)
+      case (key, PortAccept(name, kind)) => key -> PortAccept(prefix + name, kind)
+    }
+  }.toMap
 
-    val n = port.names(0) // TODO confirm that this matches our name
-    val p = port.names(1)
-    val wirename = n + "_" + p
-    outwires(p) = wirename
-    to.foreach(x => {
-      val (dest: DottedName, m: ModuleInstance) = x
-      val portname = if (dest.names.length > 1)
-        dest.names(1)
-      else
-        p
-      m.inwires(p) = wirename // TODO check portname is in port list
-
-      // TODO work out how to connect modules with different declaration types?
-      // Need to have matching sync types, but declaration just needs to match total size
-      // Could make this illegal, and force modules to do it internally - may make system safer overall
-    })
-  }
-
+  val wires = iwires.values.toList ::: owires.values.toList
 }
